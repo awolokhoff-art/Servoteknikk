@@ -12,27 +12,27 @@ struct Elevator {
     enum class State {MovingDown = 0, MovingUp = 1, Idle = 2};
     int currentFloor = 0;
     int lowerFloor = 0;
-    int upperFloor = 7;
+    int upperFloor = 8;
 
     State state = State::Idle;
 
     Elevator(State state_, int current, const std::set<int>& up,const std::set<int>& down, const std::set<int>& stops_):
     state(state_), currentFloor(current), upStops(up), downStops(down), stops(stops_) {}
 
-
     std::set<int> upStops;
     std::set<int> downStops;
     std::set<int> stops;
+
     // Forteller om heisen går opp eller ned
     void startElevatorMoving(int floor) {
         if (state == State::Idle) {
             if (currentFloor < floor) {
                 state = State::MovingUp;
-                std::cout << "Moving up " << floor << " from " << currentFloor  << std::endl;
+                std::cout << "Moving up to " << floor << " from " << currentFloor  << std::endl;
             }
             else {
                 state = State::MovingDown;
-                std::cout << "Moving down " << floor << " from " << currentFloor  << std::endl;
+                std::cout << "Moving down to " << floor << " from " << currentFloor  << std::endl;
             }
         }
     }
@@ -42,7 +42,7 @@ struct Elevator {
     }
     //Sjekker om det er flere stops nedover
     bool hasStopsDown(int floor, const std::set<int>& stops) {
-        for (int i = floor; i > 0; --i) {
+        for (int i = floor; i >= 0; --i) {
             if (stops.find(i) != stops.end()) {
                 return true;
             }
@@ -85,12 +85,12 @@ struct Elevator {
             std::cout << "Start moving up " << std::endl;
             return;
         }
-
     }
     // bare for innsiden av heisen, legger til etasjer i stops
     void addCarRequest(int floor) {
-        if (acceptedFloorRange(floor) != true)
+        if (acceptedFloorRange(floor) != true) {
             return;
+        }
         if (floor == currentFloor){
             return;
         }
@@ -99,17 +99,27 @@ struct Elevator {
     }
     //Bare for utsiden av heisen, hvor direction er viktig, legges inn i upStops og downStops.
     void addHallRequest(int floor, Request request) {
+        std::cout << "in addHallRequest" << std::endl;
         if (acceptedFloorRange(floor) != true)
             return;
+
         if (floor == currentFloor) {
             return; //open doors
         }
         if (request == Request::Up) {
             upStops.insert(floor);
         }
-        else if (request == Request::Down) {
+        if (currentFloor < floor) {
+            upStops.insert(floor);
+        }
+
+        if (request == Request::Down) {
             downStops.insert(floor);
         }
+        if (currentFloor > floor) {
+            downStops.insert(floor);
+        }
+
         startElevatorMoving(floor);
     }
     // må kjøres kontiunerlig, sjekker for hvert etasje om den skal stoppe eller ikke
@@ -124,6 +134,7 @@ struct Elevator {
             }
         }
         if (state == State::MovingDown ) {
+            std::cout << "Moving down " << currentFloor  << std::endl;
             --currentFloor;
             if (downStops.find(currentFloor) != downStops.end()) {
                 downStops.erase(currentFloor);
@@ -134,7 +145,6 @@ struct Elevator {
             stops.erase(currentFloor);
             return true;
         }
-        //changeElevatorMoving();
         return false;
     }
     // Gir ut hva neste etasje heisen skal stoppe på
@@ -143,18 +153,6 @@ struct Elevator {
         std::cout << "Next Floor is " << currentFloor << std::endl;
         return currentFloor;
 
-    }
-
-    void printStatus() const {
-        std::cout << "Elevator at floor " << currentFloor << " | Moving: ";
-        if (state == State::MovingUp ) std::cout << "Up";
-        else if (state == State::MovingDown ) std::cout << "Down";
-        else std::cout << "Idle";
-        std::cout << "\nUp stops: ";
-        for (int f : upStops) std::cout << f << " ";
-        std::cout << "\nDown stops: ";
-        for (auto it = downStops.rbegin(); it != downStops.rend(); ++it) std::cout << *it << " ";
-        std::cout << "\n-------------------\n";
     }
 };
 // enkel test for å sjekke heisen opererer som den skal
@@ -175,6 +173,7 @@ bool test(Elevator::State state_, int current,
     if (carRequest >= 0) {
         elevator.addCarRequest(carRequest);
     }
+
     if (elevator.nextFloor() != nextfloor) {
         std::cout<<"Failed"<<std::endl;
         return false;
@@ -185,8 +184,30 @@ bool test(Elevator::State state_, int current,
 }
 
 int main() {
+    std::cout<<"\nTest 1"<<std::endl;
     test(Elevator::State::Idle, 0,{},{},{},3,Request::Up,-1,3);
+    std::cout<<"\nTest 2"<<std::endl;
+    test(Elevator::State::Idle, 0,{},{},{},3,Request::Up,-1,6);
+    std::cout<<"\nTest 3"<<std::endl;
+    test(Elevator::State::MovingUp, 4,{3,6,7},{6,4},{7,8,1},1,Request::Up,-1,6);
+    std::cout<<"\nTest 4"<<std::endl;
+    test(Elevator::State::Idle, 5,{},{},{},1,Request::Down,{},1);
+    std::cout<<"\nTest 5"<<std::endl;
+    test(Elevator::State::Idle, 1,{},{},{},5,Request::Up,{},5);
+    std::cout<<"\nTest 6"<<std::endl;
+    test(Elevator::State::Idle, 5,{},{},{},1,Request::Up,{},1);
+    std::cout<<"\nTest 7"<<std::endl;
+    test(Elevator::State::Idle, 1,{},{},{},5,Request::Down,{},5);
 
+    std::cout<<"\nTest 8"<<std::endl;
+    test(Elevator::State::Idle, 3,{},{},{},2,Request::Up,{},2);
+
+    std::cout<<"\nTest 9"<<std::endl;
+    test(Elevator::State::MovingUp, 6,{},{},{7,8},3,Request::Up,{},7);
+
+    std::cout<<"\nTest 10"<<std::endl;
+    test(Elevator::State::MovingUp, 4,{},{},{8},6,Request::Up,{},6);
     return 0;
+
 }
 
