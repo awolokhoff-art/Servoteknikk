@@ -1,100 +1,15 @@
 /*
-For å bruke serial monitor må man ha baudrate på 115200 baud
 
- * ====================================================================
- * ==                     KOMBINERT HEISKONTROLLER                     ==
- * ====================================================================
- * * BESKRIVELSE:
- * Denne Arduino-skissen er en komplett kontroller for en heismodell.
- * Den kombinerer tre hoveddeler:
- * 1.  Logikk (Elevator.h): Et C++ klassebasert køsystem som bestemmer
- * hvilken etasje heisen skal til (logisk tilstand).
- * 2.  Motorstyring: PID-regulering for heismotoren (DC-motor) og
- * styring av en steppermotor for dørene.
- * 3.  Grensesnitt (UI): Håndtering av knapper (etasjevalg), lysdioder
- * og en 16x2 LCD-skjerm for statusvisning.
- *
- * --- HOVEDKOMPONENTER ---
- *
- * 1. ELEVATOR LOGIC CLASS (Elevator.h)
- * - Dette er "hjernen" i heisen.
- * - `Elevator elev;`: Hovedobjektet som holder styr på køen.
- * - `Elevator::State`: Logisk tilstand (Idle, MovingUp, MovingDown).
- * - `addCarRequest(floor)`: Legger til en forespørsel fra innsiden (knapp).
- * - `changeElevatorMoving()`: Oppdaterer den logiske tilstanden (f.eks.
- * bytter retning når den når toppen).
- *
- * 2. GLOBALE OBJEKTER OG PINS
- * - Definerer alle pins for LCD, motorer, knapper og lysdioder.
- *
- * 3. GLOBAL TILSTAND OG PARAMETERE
- * - `EncoderCount`: En 'volatile long' som telles opp/ned av interrupts
- * for å gi nøyaktig posisjon.
- * - `currentLogicalFloor`: Den etasjen heisen "er i", rundet av fra
- * encoder-verdien.
- * - `physicalTargetFloor`: Den *neste* etasjen heisen skal stoppe i.
- * - `Kp, Ki, Kd`: PID-parametere for å styre DC-motoren jevnt.
- * - `PhysicalState`: En state-machine som styrer den *fysiske*
- * tilstanden til heisen (P_IDLE, P_MOVING, P_OPENING_DOOR, etc.).
- *
- * 4. ENCODER INTERRUPTS
- * - `encoderAChange()` og `encoderBChange()`: Kjøres automatisk hver gang
- * encoder-signalene endres. Dette sikrer at vi aldri mister
- * posisjonen, uavhengig av hva som skjer i hovedloopen.
- *
- * 5. STEPPERFUNKSJONER
- * - `OpenDoor()` og `CloseDoor()`: Blokkerende funksjoner som kjører
- * steppermotoren et bestemt antall steg for å åpne/lukke døren.
- *
- * 6. HJELPEFUNKSJONER
- * - `clearRequestsAt(floor)`: Slukker lyset og fjerner alle forespørsler
- * for en etasje når heisen ankommer.
- * - `findNextTargetInDirection()`: Ser i kø-objektet (`elev`) for å finne
- * den neste logiske etasjen å stoppe på i nåværende retning.
- * - `checkButtons()`: Leser alle knappene (non-blocking) med debounce.
- * - `get...StateString()`: Konverterer 'enum'-tilstander til tekst
- * for LCD-skjermen.
- * - `updateLcd()`: Oppdaterer LCD-skjermen med ny info.
- *
- * 7. SETUP()
- * - Initialiserer alt: Serial, pins for motorer/UI, LCD-skjerm,
- * og kobler encoder-pins til interrupts.
- *
- * 8. LOOP()
- * Hovedloopen er delt i tre deler:
- *
- * 1. LES INPUTS:
- * - Henter den nåværende encoder-posisjonen (`EncoderCount`).
- * - Oppdaterer `currentLogicalFloor` basert på posisjonen.
- * - Kjører `checkButtons()` for å se etter nye forespørsler.
- *
- * 2. KJØR FYSISK STATE MACHINE:
- * - En stor `switch(physicalState)` som bestemmer hva heisen
- * fysisk skal gjøre.
- * - `P_IDLE`: Heisen står stille. Sjekker om den har en jobb
- * (enten på nåværende etasje eller en annen etasje).
- * - `P_MOVING`: Heisen er i bevegelse. Kjører PID-logikken for
- * å justere motor-PWM (`analogWrite`) basert på feilen
- * mellom `EncoderCount` og `targetPulses`.
- * - `P_OPENING_DOOR`: Kjører `updateLcd()` for å vise "HALF O",
- * kaller `OpenDoor()`, og går til `P_DOOR_OPEN`.
- * - `P_DOOR_OPEN`: Venter i `doorOpenTime` millisekunder.
- * - `P_CLOSING_DOOR`: Kjører `updateLcd()` for å vise "HALF C",
- * kaller `CloseDoor()`, og går til `P_IDLE`.
- *
- * 3. OPPDATER DISPLAY:
- * - Kjører `updateLcd()` med jevne mellomrom (`lcdUpdateInterval`)
- * for å vise status (etasje, mål, logisk tilstand, dørstatus).
- *
- * ====================================================================
- */
+  For å bruke serial monitor må man ha baudrate på 115200 baud
 
-// --------------------------------------------------------------------
+*/
+
+
 // -------------------- INCLUDES --------------------------------------
-// --------------------------------------------------------------------
+
 #include <Arduino.h>
 #include <LiquidCrystal.h>
-#include <dac.h> // Assumes dac.h is available in your environment
+#include <dac.h> 
 #include "Elevator.h"
 #include "DC_motor.h"
 #include "Stepper.h"
@@ -104,16 +19,10 @@ For å bruke serial monitor må man ha baudrate på 115200 baud
 #include "Button.h"
 #include "LED.h"
 
-// --------------------------------------------------------------------
-// -------------------- 2. GLOBAL OBJECTS & PINS ----------------------
-// --------------------------------------------------------------------
 
 // --- Global Queue Object ---
 Elevator elev;
 
-// --------------------------------------------------------------------
-// -------------------- 3. GLOBAL STATE & PARAMETERS ------------------
-// --------------------------------------------------------------------
 //-----Global variables-----
     float currentEncoderFloor = 0.0;
     int currentLogicalFloor = 0;
@@ -123,12 +32,10 @@ Elevator elev;
     unsigned long doorTimer = 0;
     const unsigned long doorOpenTime = 2000; // 2 sekunder
 
-// --------------------------------------------------------------------
-// -------------------- 6. HELPER FUNCTIONS (New) ---------------------
-// --------------------------------------------------------------------
 
-/**
- * @brief Clears all requests for a given floor and turns off its LED.
+
+/*
+ * Clears all requests for a given floor and turns off its LED.
  * Called upon arrival at a floor.
  */
 void clearRequestsAt(int floor) {
@@ -145,10 +52,10 @@ void clearRequestsAt(int floor) {
   }
 }
 
-/**
- * @brief Finds the *next* physical floor to stop at based on the
+/*
+ * Finds the *next* physical floor to stop at based on the
  * current *logical* direction from the Elevator class.
- * @return The floor number to go to, or -1 if no target.
+ * The floor number to go to, or -1 if no target.
  */
 int findNextTargetInDirection() {
   if (elev.state == Elevator::State::MovingUp) {
@@ -176,14 +83,8 @@ int findNextTargetInDirection() {
   return -1; // No target found
 }
 
-/**
- * @brief Non-blocking check of all 8 car buttons.
- * On press, adds request to queue and lights LED.
- */
-
-/**
- * @brief Sjekker for input fra Serial Monitor for å simulere
- * eksterne etasjeknapper (REQ 9 & 10).
+/*
+ * Sjekker for input fra Serial Monitor
  * Format: [etasje][retning] + Enter (f.eks. "3u" eller "2d")
  */
 void checkSerialInput() {
@@ -222,7 +123,9 @@ void checkSerialInput() {
       return; // Avslutt hvis retning er feil
     }
     
-    // *** NY BLOKK: Slå på lyset hvis kallet ble akseptert ***
+
+
+    // Slå på LED hvis kallet ble akseptert 
     if (request_accepted) {
       if(floor >= 0 && floor < NUM_BUTTONS) { // Dobbeltsjekk at etasjen er gyldig
         digitalWrite(ledPins[floor], HIGH);
@@ -233,21 +136,12 @@ void checkSerialInput() {
   }
 }
 
-/**
- * @brief Helper to convert states to printable strings for the LCD.
- */
-
-/**
- * @brief Updates the 16x2 LCD display. Called periodically.
- */
 
 
-// --------------------------------------------------------------------
-// -------------------- 7. SETUP --------------------------------------
-// --------------------------------------------------------------------
+
+// -------------------- SETUP --------------------------------------
 
 void setup() {
-  // Start Serial monitor (115200 for faster debug)
   Serial.begin(115200);
   while (!Serial); // Wait for serial
   Serial.println("Initialiserer system...");
@@ -283,23 +177,22 @@ void setup() {
 
 }
 
-// --------------------------------------------------------------------
-// -------------------- 8. MAIN LOOP (REVISED) ------------------------
-// --------------------------------------------------------------------
+
+// -------------------- MAIN LOOP ------------------------
 
 void loop() {
 
-  // --- 1. READ INPUTS ---
+  // Les inputs
   GetEncoderPos();
 
   // Check for button presses
   checkButtons();
   
-  // *** NY LINJE: Sjekk for seriell input ***
+  // Sjekk for seriell input 
   checkSerialInput();
 
 
-  // --- 2. RUN PHYSICAL STATE MACHINE (MODIFIED LOGIC) ---
+  // --- State machine ---
   switch (physicalState) {
 
     case P_IDLE: {
@@ -364,13 +257,13 @@ void loop() {
     break;
 }
 
-    // *** MODIFIED STATE (for REQ 13) ***
+    
     case P_OPENING_DOOR:
       // Linjen under er flyttet for å oppfylle REQ 13
       // clearRequestsAt(currentLogicalFloor); 
       delay(200); // Small pause before door motor
 
-      // ****** KEY FIX ******
+      
       // Force the LCD to update to "HALF O" *before* we block the loop
       updateLcd(); 
       lastLcdUpdate = millis(); // Reset LCD timer
@@ -386,7 +279,7 @@ void loop() {
       doorTimer = millis();
       break;
 
-    // *** MODIFIED STATE ***
+    
     case P_DOOR_OPEN:
       // This state is now non-blocking. It just waits for the timer.
       if (millis() - doorTimer > doorOpenTime) {
@@ -396,9 +289,9 @@ void loop() {
       }
       break;
 
-    // *** MODIFIED STATE ***
+    
     case P_CLOSING_DOOR:
-      // ****** KEY FIX ******
+      
       // Force the LCD to update to "HALF C" *before* we block the loop
       updateLcd();
       lastLcdUpdate = millis(); // Reset LCD timer
@@ -428,7 +321,6 @@ void loop() {
 
   // 2. Sjekk mot det valgte intervallet
   // Dette håndterer "OPEN" og "IDLE"/"MOVING" tilstandene.
-  // "HLF" (Half) tilstandene håndteres av den tvungne oppdateringen i state-maskinen.
   if (millis() - lastLcdUpdate > currentInterval) {
     updateLcd();
     lastLcdUpdate = millis();
