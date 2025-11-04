@@ -1,0 +1,972 @@
+/*
+For å bruke serial monitor må man ha baudrate på 115200 baud
+
+
+
+ * ====================================================================
+ * ==                     KOMBINERT HEISKONTROLLER                     ==
+ * ====================================================================
+ * * BESKRIVELSE:
+ * Denne Arduino-skissen er en komplett kontroller for en heismodell.
+ * Den kombinerer tre hoveddeler:
+ * 1.  Logikk (Elevator.h): Et C++ klassebasert køsystem som bestemmer
+ * hvilken etasje heisen skal til (logisk tilstand).
+ * 2.  Motorstyring: PID-regulering for heismotoren (DC-motor) og
+ * styring av en steppermotor for dørene.
+ * 3.  Grensesnitt (UI): Håndtering av knapper (etasjevalg), lysdioder
+ * og en 16x2 LCD-skjerm for statusvisning.
+ *
+ * --- HOVEDKOMPONENTER ---
+ *
+ * 1. ELEVATOR LOGIC CLASS (Elevator.h)
+ * - Dette er "hjernen" i heisen.
+ * - `Elevator elev;`: Hovedobjektet som holder styr på køen.
+ * - `Elevator::State`: Logisk tilstand (Idle, MovingUp, MovingDown).
+ * - `addCarRequest(floor)`: Legger til en forespørsel fra innsiden (knapp).
+ * - `changeElevatorMoving()`: Oppdaterer den logiske tilstanden (f.eks.
+ * bytter retning når den når toppen).
+ *
+ * 2. GLOBALE OBJEKTER OG PINS
+ * - Definerer alle pins for LCD, motorer, knapper og lysdioder.
+ *
+ * 3. GLOBAL TILSTAND OG PARAMETERE
+ * - `EncoderCount`: En 'volatile long' som telles opp/ned av interrupts
+ * for å gi nøyaktig posisjon.
+ * - `currentLogicalFloor`: Den etasjen heisen "er i", rundet av fra
+ * encoder-verdien.
+ * - `physicalTargetFloor`: Den *neste* etasjen heisen skal stoppe i.
+ * - `Kp, Ki, Kd`: PID-parametere for å styre DC-motoren jevnt.
+ * - `PhysicalState`: En state-machine som styrer den *fysiske*
+ * tilstanden til heisen (P_IDLE, P_MOVING, P_OPENING_DOOR, etc.).
+ *
+ * 4. ENCODER INTERRUPTS
+ * - `encoderAChange()` og `encoderBChange()`: Kjøres automatisk hver gang
+ * encoder-signalene endres. Dette sikrer at vi aldri mister
+ * posisjonen, uavhengig av hva som skjer i hovedloopen.
+ *
+ * 5. STEPPERFUNKSJONER
+ * - `OpenDoor()` og `CloseDoor()`: Blokkerende funksjoner som kjører
+ * steppermotoren et bestemt antall steg for å åpne/lukke døren.
+ *
+ * 6. HJELPEFUNKSJONER
+ * - `clearRequestsAt(floor)`: Slukker lyset og fjerner alle forespørsler
+ * for en etasje når heisen ankommer.
+ * - `findNextTargetInDirection()`: Ser i kø-objektet (`elev`) for å finne
+ * den neste logiske etasjen å stoppe på i nåværende retning.
+ * - `checkButtons()`: Leser alle knappene (non-blocking) med debounce.
+ * - `get...StateString()`: Konverterer 'enum'-tilstander til tekst
+ * for LCD-skjermen.
+ * - `updateLcd()`: Oppdaterer LCD-skjermen med ny info.
+ *
+ * 7. SETUP()
+ * - Initialiserer alt: Serial, pins for motorer/UI, LCD-skjerm,
+ * og kobler encoder-pins til interrupts.
+ *
+ * 8. LOOP()
+ * Hovedloopen er delt i tre deler:
+ *
+ * 1. LES INPUTS:
+ * - Henter den nåværende encoder-posisjonen (`EncoderCount`).
+ * - Oppdaterer `currentLogicalFloor` basert på posisjonen.
+ * - Kjører `checkButtons()` for å se etter nye forespørsler.
+ *
+ * 2. KJØR FYSISK STATE MACHINE:
+ * - En stor `switch(physicalState)` som bestemmer hva heisen
+ * fysisk skal gjøre.
+ * - `P_IDLE`: Heisen står stille. Sjekker om den har en jobb
+ * (enten på nåværende etasje eller en annen etasje).
+ * - `P_MOVING`: Heisen er i bevegelse. Kjører PID-logikken for
+ * å justere motor-PWM (`analogWrite`) basert på feilen
+ * mellom `EncoderCount` og `targetPulses`.
+ * - `P_OPENING_DOOR`: Kjører `updateLcd()` for å vise "HALF O",
+ * kaller `OpenDoor()`, og går til `P_DOOR_OPEN`.
+ * - `P_DOOR_OPEN`: Venter i `doorOpenTime` millisekunder.
+ * - `P_CLOSING_DOOR`: Kjører `updateLcd()` for å vise "HALF C",
+ * kaller `CloseDoor()`, og går til `P_IDLE`.
+ *
+ * 3. OPPDATER DISPLAY:
+ * - Kjører `updateLcd()` med jevne mellomrom (`lcdUpdateInterval`)
+ * for å vise status (etasje, mål, logisk tilstand, dørstatus).
+ *
+ * ====================================================================
+ */
+
+// --------------------------------------------------------------------
+// -------------------- INCLUDES --------------------------------------
+// --------------------------------------------------------------------
+#include <Arduino.h>
+#include <LiquidCrystal.h>
+#include <dac.h> // Assumes dac.h is available in your environment
+
+// --------------------------------------------------------------------
+// -------------------- 1. ELEVATOR LOGIC CLASS (from Elevator.h) -----
+// --------------------------------------------------------------------
+// NOTE: This is the full class definition, placed directly in the .ino
+#ifndef ELEVATOR_H
+#define ELEVATOR_H
+
+
+//in .ino #include "Elevator.h", and call Serial.begin(115200) in setup;
+//Use the class like Elevator elev; elev.addHallRequest(3, Request::Up);
+
+enum class Request { Down, Up };
+
+class Elevator {
+public:
+  enum class State { MovingDown = 0, MovingUp = 1, Idle = 2 };
+
+  // Configure number of floors here (0..MAX_FLOOR)
+  // *** MODIFIED: Changed from 8 to 7 to match the 8 UI buttons (0-7) ***
+  static const int MAX_FLOOR = 7; 
+  static const int NUM_FLOORS = MAX_FLOOR + 1; // Now 8 floors (0-7)
+
+  // public members
+  int currentFloor = 0;
+  int lowerFloor = 0;
+  int upperFloor = MAX_FLOOR;
+  State state = State::Idle;
+
+  // constructor (default)
+  Elevator(State state_ = State::Idle, int current = 0)
+    : currentFloor(current), state(state_) {
+    clearStops();
+  }
+
+  // add a stop from inside the car
+  // *** MODIFISERT: Returnerer nå bool ***
+  bool addCarRequest(int floor) {
+    if (!acceptedFloorRange(floor)) return false; // Ikke akseptert
+    if (floor == currentFloor && state == State::Idle) return false; // Allerede her, ikke akseptert
+    
+    stops[floor] = true;
+    startElevatorMoving(floor);
+    return true; // Akseptert
+  }
+
+  // add a hall request (outside), with direction
+ bool addHallRequest(int floor, Request request) {
+    Serial.println(F("in addHallRequest"));
+    
+    if (!acceptedFloorRange(floor)) return false; // Ikke akseptert
+    
+    if (floor == currentFloor && state == State::Idle) {
+        // Hvis vi allerede er her og står stille, ikke legg til i køen
+        // (I en ekte heis ville dørene bare åpnet seg)
+        return false; // Ikke akseptert
+    }
+
+    bool request_added = false; // For å sjekke om vi faktisk la til noe
+
+    if (request == Request::Up) {
+        if (!upStops[floor]) { // Bare legg til hvis det ikke allerede er registrert
+            upStops[floor] = true;
+            request_added = true;
+        }
+    } 
+    else if (request == Request::Down) {
+        if (!downStops[floor]) { // Bare legg til hvis det ikke allerede er registrert
+            downStops[floor] = true;
+            request_added = true;
+        }
+    }
+
+    // Bare start heisen hvis et *nytt* kall faktisk ble lagt til
+    if (request_added) {
+        startElevatorMoving(floor);
+        return true; // Akseptert
+    }
+
+    return false; // Ikke akseptert (f.eks. kallet fantes fra før)
+}
+
+  // *** NOTE: stopAtNextFloor() and nextFloor() are NOT used in the combined
+  //     non-blocking sketch, as they rely on simulated movement. ***
+  
+  // call repeatedly - returns true if elevator stops at the new currentFloor
+  bool stopAtNextFloor() {
+    if (state == State::MovingUp) {
+      Serial.print(F("Moving up "));
+      Serial.println(currentFloor);
+      // move one floor up
+      if (currentFloor < upperFloor) ++currentFloor;
+
+      if (upStops[currentFloor]) {
+        upStops[currentFloor] = false;
+        return true;
+      }
+    }
+
+    if (state == State::MovingDown) {
+      Serial.print(F("Moving down "));
+      Serial.println(currentFloor);
+      if (currentFloor > lowerFloor) --currentFloor;
+
+      if (downStops[currentFloor]) {
+        downStops[currentFloor] = false;
+        return true;
+      }
+    }
+
+    if (stops[currentFloor]) {
+      stops[currentFloor] = false;
+      return true;
+    }
+
+    return false;
+  }
+
+  // blocks until next stop and returns the floor number
+  int nextFloor() {
+    unsigned long loopStart = millis();
+    const unsigned long TIMEOUT_MS = 20000UL; 
+    while (!stopAtNextFloor()) {
+      changeElevatorMoving();
+      delay(10);
+      if (!hasAnyStops()) {
+        Serial.println(F("No stops left - breaking nextFloor loop"));
+        break;
+      }
+      if (millis() - loopStart > TIMEOUT_MS) {
+        Serial.println(F("nextFloor timeout - breaking loop"));
+        break;
+      }
+    }
+    Serial.print(F("Next Floor is "));
+    Serial.println(currentFloor);
+    return currentFloor;
+  }
+
+
+  // change direction/state when needed (based on remaining stops)
+  // *** This IS used in the combined sketch ***
+  void changeElevatorMoving() {
+    if (!hasAnyStops()) {
+      state = State::Idle;
+      //Serial.println(F("Stopping elevator")); // Too noisy
+      return;
+    }
+
+    if (state == State::MovingUp) {
+      if (hasStopsUp(currentFloor)) return;
+      if (hasStopsUpFromAny(currentFloor)) return;
+      state = State::MovingDown;
+      Serial.println(F("Logic: Start moving down"));
+      return;
+    }
+
+    if (state == State::MovingDown) {
+      if (hasStopsDown(currentFloor)) return;
+      if (hasStopsDownFromAny(currentFloor)) return;
+      state = State::MovingUp;
+      Serial.println(F("Logic: Start moving up"));
+      return;
+    }
+
+    // If Idle but there are stops, decide direction based on nearest/requests:
+    if (state == State::Idle) {
+      // simple policy: if there is any stop above => move up, else move down
+      if (hasStopsUpFromAny(currentFloor) || hasStopsUp(currentFloor)) {
+        state = State::MovingUp;
+        Serial.println(F("Logic: Idle -> start moving up"));
+      } else if (hasStopsDownFromAny(currentFloor) || hasStopsDown(currentFloor)) {
+        state = State::MovingDown;
+        Serial.println(F("Logic: Idle -> start moving down"));
+      }
+    }
+  }
+
+  // call to reset all stops
+  void clearStops() {
+    for (int i = 0; i < NUM_FLOORS; ++i) {
+      upStops[i] = false;
+      downStops[i] = false;
+      stops[i] = false;
+    }
+  }
+
+  // simple helpers
+  bool hasAnyStops() const {
+    for (int i = 0; i < NUM_FLOORS; ++i) {
+      if (upStops[i] || downStops[i] || stops[i]) return true;
+    }
+    return false;
+  }
+
+  // For testing convenience: set a raw stop
+  void setStop(int floor) {
+    if (acceptedFloorRange(floor)) stops[floor] = true;
+  }
+
+  // internal stop storage (arrays indexed by floor number)
+  bool upStops[NUM_FLOORS];
+  bool downStops[NUM_FLOORS];
+  bool stops[NUM_FLOORS];
+
+  // start moving based on a requested floor
+  void startElevatorMoving(int floor) {
+    if (state == State::Idle) {
+      if (currentFloor < floor) {
+        state = State::MovingUp;
+        Serial.print(F("Logic: Moving up to "));
+        Serial.print(floor);
+        Serial.print(F(" from "));
+        Serial.println(currentFloor);
+      } else if (currentFloor > floor) {
+        state = State::MovingDown;
+        Serial.print(F("Logic: Moving down to "));
+        Serial.print(floor);
+        Serial.print(F(" from "));
+        Serial.println(currentFloor);
+      } else {
+        // same floor -> remain idle (doors would open)
+      }
+    }
+  }
+
+  // check if there are stops strictly above given floor in upStops array
+  bool hasStopsUp(int floor) const {
+    for (int i = floor + 1; i <= upperFloor; ++i) {
+      if (upStops[i]) return true;
+    }
+    return false;
+  }
+
+  // check if any stops above in any stops array (used in changeElevatorMoving)
+  bool hasStopsUpFromAny(int floor) const {
+    for (int i = floor + 1; i <= upperFloor; ++i) {
+      if (upStops[i] || stops[i] || downStops[i]) return true;
+    }
+    return false;
+  }
+
+  // check if there are stops at or below floor in downStops array
+  bool hasStopsDown(int floor) const {
+    for (int i = floor - 1; i >= lowerFloor; --i) {
+      if (downStops[i]) return true;
+    }
+    return false;
+  }
+
+  // check if any stops below in any stops array
+  bool hasStopsDownFromAny(int floor) const {
+    for (int i = floor - 1; i >= lowerFloor; --i) {
+      if (downStops[i] || stops[i] || upStops[i]) return true;
+    }
+    return false;
+  }
+
+  // check valid floor range
+  bool acceptedFloorRange(int floor) const {
+    if (floor >= lowerFloor && floor <= upperFloor) return true;
+    Serial.println(F("You have entered a floor outside of the scope, try again"));
+    return false;
+  }
+};
+
+#endif // ELEVATOR_H
+
+
+// --------------------------------------------------------------------
+// -------------------- 2. GLOBAL OBJECTS & PINS ----------------------
+// --------------------------------------------------------------------
+
+// --- Global Queue Object ---
+Elevator elev;
+
+// --- LCD (from 'vise det på skjerm') ---
+LiquidCrystal lcd(41, 40, 37, 36, 35, 34);
+const int LCD_BACKLIGHT = 4;
+unsigned long lastLcdUpdate = 0;
+// *** MODIFISERT: To-trinns oppdateringshastighet ***
+const long lcdUpdateInterval_Active = 250; // 250ms (4Hz) når den er aktiv
+const long lcdUpdateInterval_Idle = 5000;  // 5000ms (0.2Hz) når den hviler
+
+// --- Stepper Motor (Doors) (from 'Motorstyring') ---
+const int A_phase  = 68;
+const int B_phase  = 66;
+const int A_enable = 69;
+const int B_enable = 67;
+const int stepsPerRevolution = 197; // For door motor
+
+// --- DC Motor (Lift) (from 'Motorstyring') ---
+const int directionPin = 6;
+const int PWMpin = 7;
+const int EncoderA = 20;
+const int EncoderB = 21;
+
+// --- Buttons & LEDs (from 'vise det på skjerm') ---
+// 8 buttons for floors 0-7
+const int NUM_BUTTONS = 8;
+const int buttonPins[] = {22, 23, 24, 25, 26, 27, 28, 29};
+const int ledPins[] = {49, 48, 47, 46, 45, 44, 43, 42}; // LEDs 0-7
+
+// --- Button Debounce State ---
+unsigned long lastDebounceTime[NUM_BUTTONS] = {0};
+bool lastStableState[NUM_BUTTONS] = {HIGH};
+bool lastReading[NUM_BUTTONS] = {HIGH};
+const unsigned long debounceDelay = 50;
+
+
+// --------------------------------------------------------------------
+// -------------------- 3. GLOBAL STATE & PARAMETERS ------------------
+// --------------------------------------------------------------------
+
+// --- Encoder & Position ---
+volatile long EncoderCount = 0;
+const int PulsesPerRevolution = 8380;
+float currentEncoderFloor = 0.0; // Precise float position
+int currentLogicalFloor = 0;     // Rounded integer position
+int physicalTargetFloor = 0;     // The *next* floor the motor will stop at
+const float floorTolerance = 0.05; // Arrival tolerance
+
+// --- DC Motor Control ---
+bool MotorDirection = true; // true = UP, false = DOWN
+int PwmValue = 0;
+
+// --- PID-parametre ---
+float Kp = 0.2;  // proporsjonal
+float Ki = 0.1;  // integrasjon
+float Kd = 0.05;  // derivasjon
+long lastError = 0;
+float integral = 0;
+unsigned long lastTime = 0;
+
+// --- Physical State Machine (from 'Motorstyring') ---
+enum PhysicalState {
+  P_IDLE,
+  P_MOVING,
+  P_OPENING_DOOR,
+  P_DOOR_OPEN,
+  P_CLOSING_DOOR
+};
+PhysicalState physicalState = P_IDLE;
+unsigned long doorTimer = 0;
+const unsigned long doorOpenTime = 2000; // 2 sekunder
+
+
+// --------------------------------------------------------------------
+// -------------------- 4. ENCODER INTERRUPTS (from 'Motorstyring') ---
+// --------------------------------------------------------------------
+
+void encoderAChange() {
+  int a = digitalRead(EncoderA);
+  int b = digitalRead(EncoderB);
+  if (a == b) EncoderCount++;
+  else EncoderCount--;
+}
+
+void encoderBChange() {
+  int a = digitalRead(EncoderA);
+  int b = digitalRead(EncoderB);
+  if (a != b) EncoderCount++;
+  else EncoderCount--;
+}
+
+// --------------------------------------------------------------------
+// -------------------- 5. STEPPER FUNCTIONS (from 'Motorstyring') ----
+// --------------------------------------------------------------------
+int step = 0;
+void fullStepForward() {
+  digitalWrite(A_enable, HIGH);
+  digitalWrite(B_enable, HIGH);
+  switch (step) {
+    case 0: digitalWrite(A_phase, HIGH); digitalWrite(B_phase, LOW); break;
+    case 1: digitalWrite(A_phase, HIGH); digitalWrite(B_phase, HIGH); break;
+    case 2: digitalWrite(A_phase, LOW);  digitalWrite(B_phase, HIGH); break;
+    case 3: digitalWrite(A_phase, LOW);  digitalWrite(B_phase, LOW);  break;
+  }
+  step = (step + 1) % 4;
+  delay(7);
+}
+void fullStepBackward() {
+  digitalWrite(A_enable, HIGH);
+  digitalWrite(B_enable, HIGH);
+  switch (step) {
+    case 0: digitalWrite(A_phase, LOW); digitalWrite(B_phase, LOW); break;
+    case 1: digitalWrite(A_phase, LOW); digitalWrite(B_phase, HIGH); break;
+    case 2: digitalWrite(A_phase, HIGH);  digitalWrite(B_phase, HIGH); break;
+    case 3: digitalWrite(A_phase, HIGH);  digitalWrite(B_phase, LOW);  break;
+  }
+  step = (step + 1) % 4;
+  delay(7);
+}
+void OpenDoor() {
+  Serial.println("Phys: Opening door...");
+  step = 0;
+  digitalWrite(A_enable, HIGH);
+  digitalWrite(B_enable, HIGH);
+  for (int i = 0; i < stepsPerRevolution; i++) fullStepForward();
+  stopMotor(); // Disable stepper
+  delay(50);
+  Serial.println("Phys: Door open.");
+}
+void CloseDoor() {
+  Serial.println("Phys: Closing door...");
+  step = 0;
+  digitalWrite(A_enable, HIGH);
+  digitalWrite(B_enable, HIGH);
+  for (int i = 0; i < stepsPerRevolution; i++) fullStepBackward();
+  stopMotor(); // Disable stepper
+  delay(50);
+  Serial.println("Phys: Door closed.");
+}
+void stopMotor() {
+  digitalWrite(A_enable, LOW);
+  digitalWrite(B_enable, LOW);
+}
+
+
+// --------------------------------------------------------------------
+// -------------------- 6. HELPER FUNCTIONS (New) ---------------------
+// --------------------------------------------------------------------
+
+/**
+ * @brief Clears all requests for a given floor and turns off its LED.
+ * Called upon arrival at a floor.
+ */
+void clearRequestsAt(int floor) {
+  if (floor < 0 || floor > elev.MAX_FLOOR) return;
+  
+  // Check if any request exists before printing
+  if (elev.stops[floor] || elev.upStops[floor] || elev.downStops[floor]) {
+    Serial.print("Phys: Servicing floor ");
+    Serial.println(floor);
+    elev.stops[floor] = false;
+    elev.upStops[floor] = false;
+    elev.downStops[floor] = false;
+    digitalWrite(ledPins[floor], LOW);
+  }
+}
+
+/**
+ * @brief Finds the *next* physical floor to stop at based on the
+ * current *logical* direction from the Elevator class.
+ * @return The floor number to go to, or -1 if no target.
+ */
+int findNextTargetInDirection() {
+  if (elev.state == Elevator::State::MovingUp) {
+    // 1. Find closest stop (car or hall-up) in direction of travel
+    for (int f = currentLogicalFloor + 1; f <= elev.upperFloor; f++) {
+      if (elev.stops[f] || elev.upStops[f]) return f;
+    }
+    // 2. If none, find highest hall-down call (turnaround point)
+    for (int f = elev.upperFloor; f > currentLogicalFloor; f--) {
+      if (elev.downStops[f]) return f;
+    }
+  }
+  
+  else if (elev.state == Elevator::State::MovingDown) {
+    // 1. Find closest stop (car or hall-down) in direction of travel
+    for (int f = currentLogicalFloor - 1; f >= elev.lowerFloor; f--) {
+      if (elev.stops[f] || elev.downStops[f]) return f;
+    }
+    // 2. If none, find lowest hall-up call (turnaround point)
+    for (int f = elev.lowerFloor; f < currentLogicalFloor; f++) {
+      if (elev.upStops[f]) return f;
+    }
+  }
+  
+  return -1; // No target found
+}
+
+/**
+ * @brief Non-blocking check of all 8 car buttons.
+ * On press, adds request to queue and lights LED.
+ */
+void checkButtons() {
+  for (int i = 0; i < NUM_BUTTONS; i++) {
+    bool reading = digitalRead(buttonPins[i]);
+    
+    // If the switch changed, due to noise or pressing:
+    if (reading != lastReading[i]) {
+      lastDebounceTime[i] = millis();
+    }
+    
+    if ((millis() - lastDebounceTime[i]) > debounceDelay) {
+      // whatever the reading is at, it's been there for longer
+      // than the debounce delay, so take it as the actual current state:
+      if (reading != lastStableState[i]) {
+        lastStableState[i] = reading;
+        
+        // If the button was just PRESSED (went from HIGH to LOW)
+        if (lastStableState[i] == LOW) {
+          
+          // *** MODIFISERT LOGIKK ***
+          // Prøv å legg til forespørsel. Funksjonen returnerer true
+          // hvis den ble akseptert, false hvis den ble ignorert.
+          bool request_accepted = elev.addCarRequest(i);
+          
+          if (request_accepted) {
+            Serial.print("UI: Button pressed for floor ");
+            Serial.println(i);
+            digitalWrite(ledPins[i], HIGH); // Turn on LED
+          } else {
+            Serial.print("UI: Ignored button press for floor ");
+            Serial.println(i);
+            // Ikke slå på lysdioden
+          }
+        }
+      }
+    }
+    lastReading[i] = reading;
+  }
+}
+
+
+/**
+ * @brief Sjekker for input fra Serial Monitor for å simulere
+ * eksterne etasjeknapper (REQ 9 & 10).
+ * Format: [etasje][retning] + Enter (f.eks. "3u" eller "2d")
+ */
+void checkSerialInput() {
+  if (Serial.available() > 0) {
+    // Les hele strengen til brukeren trykker Enter
+    String input = Serial.readStringUntil('\n');
+    input.trim(); // Fjern eventuelle mellomrom
+
+    if (input.length() != 2) {
+      Serial.println("Ugyldig input. Bruk format: [etasje][retning] (f.eks. '3u')");
+      return;
+    }
+
+    // Konverter første tegn (etasje) til et tall
+    // '3' (char) - '0' (char) = 3 (int)
+    int floor = input.charAt(0) - '0';
+
+    // Les andre tegn (retning)
+    char direction = input.charAt(1);
+    bool request_accepted = false; // Lag en variabel for å sjekke
+
+    if (direction == 'u') {
+      Serial.print("Simulerer eksternt kall: Etasje ");
+      Serial.print(floor);
+      Serial.println(" OPP");
+      request_accepted = elev.addHallRequest(floor, Request::Up); // Få returverdi
+    } 
+    else if (direction == 'd') {
+      Serial.print("Simulerer eksternt kall: Etasje ");
+      Serial.print(floor);
+      Serial.println(" NED");
+      request_accepted = elev.addHallRequest(floor, Request::Down); // Få returverdi
+    } 
+    else {
+      Serial.println("Ugyldig retning. Bruk 'u' for opp eller 'd' for ned.");
+      return; // Avslutt hvis retning er feil
+    }
+    
+    // *** NY BLOKK: Slå på lyset hvis kallet ble akseptert ***
+    if (request_accepted) {
+      if(floor >= 0 && floor < NUM_BUTTONS) { // Dobbeltsjekk at etasjen er gyldig
+        digitalWrite(ledPins[floor], HIGH);
+      }
+    } else {
+      Serial.println("... forespørsel ignorert (sannsynligvis allerede der).");
+    }
+  }
+}
+
+
+/**
+ * @brief Helper to convert states to printable strings for the LCD.
+ */
+// ====================================================================
+// =================== DENNE FUNKSJONEN ER GJENINNSATT =================
+// ====================================================================
+const char* getPhysicalStateString(PhysicalState s) {
+  switch (s) {
+    case P_IDLE: return "CLSD"; // Changed from "IDLE  "
+    case P_MOVING: return "CLSD"; // Changed from "MOVING"
+    case P_OPENING_DOOR: return "HLF"; // Changed from "OPENIN"
+    case P_DOOR_OPEN: return "OPN"; // Unchanged
+    case P_CLOSING_DOOR: return "HLF"; // Changed from "CLOSIN"
+    default: return "???   ";
+  }
+}
+
+// ====================================================================
+// =================== DENNE FUNKSJONEN ER RETTET =====================
+// ====================================================================
+const char* getLogicalStateString(Elevator::State s) {
+  switch (s) {
+    case Elevator::State::Idle: return "Ide";
+    // RETTET: Bruker "::State::" istedenfor ".state::"
+    case Elevator::State::MovingUp: return "Up "; 
+    // RETTET: Bruker "::State::" istedenfor ".state::"
+    case Elevator::State::MovingDown: return "Dwn"; 
+    default: return "??? ";
+  }
+}
+
+
+/**
+ * @brief Updates the 16x2 LCD display. Called periodically.
+ */
+void updateLcd() {
+  lcd.clear();
+  
+  // Line 0: Floor Status
+  lcd.setCursor(0, 0);
+  lcd.print("Floor:");
+  lcd.print(currentLogicalFloor);
+  lcd.print("|Target:");   // setter denne til senter
+  lcd.print(physicalTargetFloor);
+  
+  // Line 1: State Status
+  lcd.setCursor(0, 1);
+  lcd.print("Sta:");
+  lcd.print(getLogicalStateString(elev.state));
+  lcd.print("|Door:");
+  lcd.print(getPhysicalStateString(physicalState)); // Denne linjen skal nå fungere
+}
+
+
+// --------------------------------------------------------------------
+// -------------------- 7. SETUP --------------------------------------
+// --------------------------------------------------------------------
+
+void setup() {
+  // Start Serial monitor (115200 for faster debug)
+  Serial.begin(115200);
+  while (!Serial); // Wait for serial
+  Serial.println("Initialiserer system...");
+
+  // --- Initialize Stepper (Doors) ---
+  pinMode(A_phase, OUTPUT);
+  pinMode(B_phase, OUTPUT);
+  pinMode(A_enable, OUTPUT);
+  pinMode(B_enable, OUTPUT);
+  stopMotor(); // Ensure doors are not drawing power
+
+  // --- Initialize DC Motor (Lift) ---
+  pinMode(directionPin, OUTPUT);
+  pinMode(PWMpin, OUTPUT);
+  analogWrite(PWMpin, 0);
+
+  // --- Initialize Encoders ---
+  pinMode(EncoderA, INPUT);
+  pinMode(EncoderB, INPUT);
+  attachInterrupt(digitalPinToInterrupt(EncoderA), encoderAChange, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(EncoderB), encoderBChange, CHANGE);
+  
+  // --- Initialize DAC ---
+  dac_init();
+  set_dac(3500, 3500);
+
+  // --- Initialize Buttons (UI) ---
+  for (int i = 0; i < NUM_BUTTONS; ++i) {
+    pinMode(buttonPins[i], INPUT_PULLUP); // Use internal pull-up resistors
+    // Read initial state for debounce
+    lastStableState[i] = digitalRead(buttonPins[i]);
+    lastReading[i] = lastStableState[i];
+  }
+
+  // --- Initialize LEDs (UI) ---
+  for (int i = 0; i < NUM_BUTTONS; ++i) {
+    pinMode(ledPins[i], OUTPUT);
+    digitalWrite(ledPins[i], LOW); // All LEDs off
+  }
+
+  // --- Initialize LCD (UI) ---
+  pinMode(LCD_BACKLIGHT, OUTPUT);
+  digitalWrite(LCD_BACKLIGHT, HIGH);
+  lcd.begin(16, 2);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Elevator ready");
+  lcd.setCursor(0, 1);
+  lcd.print("Floors: 0-7");
+
+  // --- Initialize Timers ---
+  lastTime = millis();
+  delay(1000); // Wait 1 sec
+  Serial.println("Klar!");
+}
+
+
+// --------------------------------------------------------------------
+// -------------------- 8. MAIN LOOP (REVISED) ------------------------
+// --------------------------------------------------------------------
+
+void loop() {
+
+  // --- 1. READ INPUTS ---
+  
+  // Get current encoder position
+  noInterrupts();
+  long countCopy = EncoderCount;
+  interrupts();
+  
+  currentEncoderFloor = (float)countCopy / (float)PulsesPerRevolution;
+  int newLogicalFloor = round(currentEncoderFloor);
+  
+  if (newLogicalFloor != currentLogicalFloor) {
+      currentLogicalFloor = newLogicalFloor;
+      elev.currentFloor = currentLogicalFloor; // Sync the logic class
+      Serial.print("Phys: Reached floor ");
+      Serial.println(currentLogicalFloor);
+  }
+
+  // Check for button presses
+  checkButtons();
+  
+  // *** NY LINJE: Sjekk for seriell input ***
+  checkSerialInput();
+
+
+  // --- 2. RUN PHYSICAL STATE MACHINE (MODIFIED LOGIC) ---
+  switch (physicalState) {
+
+    case P_IDLE: {
+      // Elevator is stopped, doors are closed. Time to find a new job.
+      
+      // First, check if there's a request AT the current floor
+      if (elev.stops[currentLogicalFloor] || elev.upStops[currentLogicalFloor] || elev.downStops[currentLogicalFloor]) {
+        Serial.println("Phys: Request at current floor. Opening doors.");
+        physicalState = P_OPENING_DOOR;
+        // NOTE: We no longer set doorTimer here
+      } 
+      else {
+        // If no job here, ask the logic class what to do
+        elev.changeElevatorMoving(); // Updates elev.state
+        
+        // RETTET: Bruker "::State::" istedenfor ".State::"
+        if (elev.state != Elevator::State::Idle) {
+          // Logic class wants to move. Find the *next* stop.
+          physicalTargetFloor = findNextTargetInDirection();
+          
+          if (physicalTargetFloor != -1) {
+            // We have a target!
+            Serial.print("Phys: New target acquired: ");
+            Serial.println(physicalTargetFloor);
+            physicalState = P_MOVING;
+            // Reset PID
+            integral = 0;
+            lastError = 0;
+            lastTime = millis();
+          } else {
+            // Logic state is moving, but no target found?
+            // This can happen if only a request at current floor exists
+            // which was missed. Force logic back to Idle.
+            // RETTET: Bruker "::State::" istedenfor ".State::"
+            elev.state = Elevator::State::Idle;
+          }
+        }
+      }
+      break;
+    }
+
+    case P_MOVING: {
+      // PID-regulering
+      unsigned long now = millis();
+      float dt = (now - lastTime) / 1000.0;
+      lastTime = now;
+
+      long targetPulses = (long)physicalTargetFloor * PulsesPerRevolution;
+      long error = targetPulses - EncoderCount;
+      
+      // Don't let integral wind up if we are saturated
+      if(abs(PwmValue) < 255) {
+          integral += error * dt;
+      }
+      
+      float derivative = (error - lastError) / dt;
+      float output = Kp * error + Ki * integral + Kd * derivative;
+      lastError = error;
+
+      // Sett retning og PWM
+      MotorDirection = (output >= 0); // true = UP
+      PwmValue = constrain(abs(output), 0, 60); // Constrain PWM 0-100 (din verdi på 20 er beholdt)
+
+      analogWrite(PWMpin, PwmValue);
+      digitalWrite(directionPin, MotorDirection ? HIGH : LOW);
+
+      // Sjekk om vi er innenfor toleranse (ARRIVED)
+      if (abs((float)error / PulsesPerRevolution) < floorTolerance) {
+        PwmValue = 0;
+        analogWrite(PWMpin, 0); // Stop motor
+        
+        currentLogicalFloor = physicalTargetFloor; // Lock in our floor
+        elev.currentFloor = currentLogicalFloor;   // Sync logic
+        
+        Serial.print("Phys: Arrived at target floor ");
+        Serial.println(currentLogicalFloor);
+        
+        physicalState = P_OPENING_DOOR; // Change state to open the door
+        // NOTE: We no longer set doorTimer here
+      }
+      break;
+    }
+
+    // *** MODIFIED STATE (for REQ 13) ***
+    case P_OPENING_DOOR:
+      // Linjen under er flyttet for å oppfylle REQ 13
+      // clearRequestsAt(currentLogicalFloor); 
+      delay(200); // Small pause before door motor
+
+      // ****** KEY FIX ******
+      // Force the LCD to update to "HALF O" *before* we block the loop
+      updateLcd(); 
+      lastLcdUpdate = millis(); // Reset LCD timer
+
+      OpenDoor(); // This is the blocking call
+
+      // *** NY PLASSERING for REQ 13 ***
+      // Forespørsler slettes *etter* at døren er helt åpen 
+      clearRequestsAt(currentLogicalFloor); 
+
+      // Now that the door is fully open, change state and start the timer
+      physicalState = P_DOOR_OPEN;
+      doorTimer = millis();
+      break;
+
+    // *** MODIFIED STATE ***
+    case P_DOOR_OPEN:
+      // This state is now non-blocking. It just waits for the timer.
+      if (millis() - doorTimer > doorOpenTime) {
+        // Timer expired, change state to *begin* closing.
+        physicalState = P_CLOSING_DOOR;
+        // We do *not* call CloseDoor() here anymore.
+      }
+      break;
+
+    // *** MODIFIED STATE ***
+    case P_CLOSING_DOOR:
+      // ****** KEY FIX ******
+      // Force the LCD to update to "HALF C" *before* we block the loop
+      updateLcd();
+      lastLcdUpdate = millis(); // Reset LCD timer
+
+      CloseDoor(); // This is the blocking call
+
+      // Now that the door is fully closed, go back to IDLE
+      physicalState = P_IDLE;
+      Serial.println("Phys: Ready for next job.");
+      break;
+  }
+
+  // --- 3. UPDATE DISPLAY (Adaptive) ---
+  
+  // 1. Bestem riktig oppdateringsintervall
+  long currentInterval;
+  
+  // RETTET: Bruker "::State::" istedenfor ".State::"
+  if (physicalState == P_IDLE && elev.state == Elevator::State::Idle && !elev.hasAnyStops()) {
+    // Systemet er helt i hvilemodus (ingen bevegelse, ingen jobber i kø)
+    // Senk oppdateringshastigheten.
+    currentInterval = lcdUpdateInterval_Idle;
+  } else {
+    // Systemet er aktivt (flytter seg, dører åpne, eller har jobber som venter)
+    currentInterval = lcdUpdateInterval_Active;
+  }
+
+  // 2. Sjekk mot det valgte intervallet
+  // Dette håndterer "OPEN" og "IDLE"/"MOVING" tilstandene.
+  // "HLF" (Half) tilstandene håndteres av den tvungne oppdateringen i state-maskinen.
+  if (millis() - lastLcdUpdate > currentInterval) {
+    updateLcd();
+    lastLcdUpdate = millis();
+  }
+
+  // Small delay to keep loop stable
+  delay(5);
+}
