@@ -15,7 +15,7 @@ extern const long lcdUpdateInterval_Idle;
 
 // --- Heisvariabler brukt i LCD ---
 extern int currentLogicalFloor;
-extern int physicalTargetFloor;
+extern long physicalTargetFloor;
 extern PhysicalState physicalState;
 extern Elevator elev;
 
