@@ -49,21 +49,21 @@ void Elevator::changeElevatorMoving() {
     }
 
     if (state == State::MovingUp) {
-        if (hasStopsUpFromAny(currentFloor)) return;
+        if (hasStopsUp(currentFloor) || hasStopsUpFromAny(currentFloor)) return;
         state = State::MovingDown;
         return;
     }
 
     if (state == State::MovingDown) {
-        if (hasStopsDownFromAny(currentFloor)) return;
+        if (hasStopsDown(currentFloor) || hasStopsDownFromAny(currentFloor)) return;
         state = State::MovingUp;
         return;
     }
 
     if (state == State::Idle) {
-        if (hasStopsUpFromAny(currentFloor))
+        if (hasStopsUp(currentFloor) || hasStopsUpFromAny(currentFloor))
             state = State::MovingUp;
-        else if (hasStopsDownFromAny(currentFloor))
+        else if (hasStopsDown(currentFloor) || hasStopsDownFromAny(currentFloor))
             state = State::MovingDown;
     }
 }
@@ -95,9 +95,18 @@ void Elevator::startElevatorMoving(int floor) {
     }
 }
 
+bool Elevator::hasStopsUp(int floor) const {
+    for (int i = floor + 1; i <= upperFloor; ++i) if (upStops[i]) return true;
+    return false;
+}
 
 bool Elevator::hasStopsUpFromAny(int floor) const {
     for (int i = floor + 1; i <= upperFloor; ++i) if (upStops[i] || downStops[i] || stops[i]) return true;
+    return false;
+}
+
+bool Elevator::hasStopsDown(int floor) const {
+    for (int i = floor - 1; i >= lowerFloor; --i) if (downStops[i]) return true;
     return false;
 }
 

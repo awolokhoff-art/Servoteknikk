@@ -38,7 +38,9 @@ public:
 
 private:
     void startElevatorMoving(int floor);
+    bool hasStopsUp(int floor) const;
     bool hasStopsUpFromAny(int floor) const;
+    bool hasStopsDown(int floor) const;
     bool hasStopsDownFromAny(int floor) const;
 };
 
