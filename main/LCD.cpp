@@ -19,17 +19,17 @@ PhysicalState LCD::physicalState;
 
 const char* LCD::getLogicalStateString(Elevator::State s) {
     switch (s) {
-        case Elevator::State::Idle: return "Ide";
-        case Elevator::State::MovingUp: return "Up ";
-        case Elevator::State::MovingDown: return "Dwn";
+        case Elevator::State::Idle: return "IDE";
+        case Elevator::State::MovingUp: return "UP ";
+        case Elevator::State::MovingDown: return "DWN";
         default: return "???";
     }
 }
 
 const char* LCD::getPhysicalStateString(PhysicalState s) {
     switch (s) {
-        case P_IDLE: return "CLSD";
-        case P_MOVING: return "CLSD";
+        case P_IDLE: return "CLS";
+        case P_MOVING: return "CLS";
         case P_OPENING_DOOR: return "HLF";
         case P_DOOR_OPEN: return "OPN";
         case P_CLOSING_DOOR: return "HLF";
