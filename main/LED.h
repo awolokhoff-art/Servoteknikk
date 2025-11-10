@@ -2,7 +2,7 @@
 #define LED_h
 
 #include <Arduino.h>
-#include "Button.h"
+#include "Control.h"
 
 class LED{
 private:

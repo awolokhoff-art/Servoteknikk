@@ -1,10 +1,10 @@
-#ifndef Button_h
-#define Button_h
+#ifndef Control_h
+#define Control_h
 
 #include <Arduino.h>
 #include "Elevator.h"  // For å bruke elev.addCarRequest()
 
-class Button{
+class Control{
 
 private:
   static const int NUM_BUTTONS = 8;
@@ -19,7 +19,7 @@ private:
 
 
 public:
-  Button();
+  Control();
   void Button_init();       // Initialiser pins og debounce state
   void checkButtons();      // Sjekk de fysiiske knappene  og håndter presses
   void checkSerialInput();  // Får Serial Monitor inputs, konverter dem til "taste trykk"

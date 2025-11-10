@@ -1,17 +1,17 @@
-#include "Button.h"
+#include "Control.h"
 #include "Elevator.h" 
 #include "LED.h" // LED::ledPins
 
 extern Elevator elev; 
 
-const int Button::buttonPins[] = {22, 23, 24, 25, 26, 27, 28, 29};
+const int Control::buttonPins[] = {22, 23, 24, 25, 26, 27, 28, 29};
 
-unsigned long Button::lastDebounceTime[Button::NUM_BUTTONS] = {0};
-bool Button::lastStableState[Button::NUM_BUTTONS] = {HIGH};
-bool Button::lastReading[Button::NUM_BUTTONS] = {HIGH};
-const unsigned long Button::debounceDelay = 50;
+unsigned long Control::lastDebounceTime[Control::NUM_BUTTONS] = {0};
+bool Control::lastStableState[Control::NUM_BUTTONS] = {HIGH};
+bool Control::lastReading[Control::NUM_BUTTONS] = {HIGH};
+const unsigned long Control::debounceDelay = 50;
 
-Button::Button(){
+Control::Control(){
     for (int i = 0; i < NUM_BUTTONS; ++i) {
         lastStableState[i] = HIGH;
         lastReading[i] = HIGH;
@@ -19,7 +19,7 @@ Button::Button(){
     }
 }
 
-void Button::Button_init(){
+void Control::Button_init(){
 
   for (int i = 0; i < NUM_BUTTONS; ++i) 
   {
@@ -29,7 +29,7 @@ void Button::Button_init(){
   }
 }
 
-void Button::checkSerialInput(){
+void Control::checkSerialInput(){
   if (Serial.available() > 0) {
     // Les hele strengen til brukeren trykker Enter
     String input = Serial.readStringUntil('\n');
@@ -67,7 +67,7 @@ void Button::checkSerialInput(){
   
     // Slå på LED hvis kallet ble akseptert 
     if (request_accepted) {
-      if(floor >= 0 && floor < Button::NUM_BUTTONS) { // Dobbeltsjekk at etasjen er gyldig
+      if(floor >= 0 && floor < Control::NUM_BUTTONS) { // Dobbeltsjekk at etasjen er gyldig
         digitalWrite(LED::ledPins[floor], HIGH);
       }
     } else {
@@ -76,7 +76,7 @@ void Button::checkSerialInput(){
   }
 }
 
-void Button::checkButtons(){
+void Control::checkButtons(){
   for (int i = 0; i < NUM_BUTTONS; i++) 
   {
     bool reading = digitalRead(buttonPins[i]);

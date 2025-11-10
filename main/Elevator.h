@@ -37,7 +37,8 @@ public:
     int upperFloor = MAX_FLOOR;
     
     State state = State::Idle;
-
+    
+    // Request added in three queues
     bool upStops[NUM_FLOORS];
     bool downStops[NUM_FLOORS];
     bool stops[NUM_FLOORS];
@@ -46,7 +47,9 @@ public:
     bool addCarRequest(int floor);
     bool addHallRequest(int floor, Request request);
 
-    void processPhysicalState(); 
+    void isRequest();
+    void processPhysicalState();
+     
 
 };
 #endif

@@ -169,17 +169,8 @@ void Elevator::startElevatorMoving(int floor) {
     }
 }
 
-void Elevator::processPhysicalState() {
-  
-  //State machine
-  switch (physicalState) {
-    Serial.print("DEBUG: this ->state = ");
-    Serial.println((int)this ->state);
-
-    case P_IDLE: {
-      // Elevator is stopped, doors are closed. Time to find a new job.
-      
-      // First, check if there's a request AT the current floor
+void Elevator::isRequest(){
+  // First, check if there's a request AT the current floor
       if (stops[currentLogicalFloor] || upStops[currentLogicalFloor] || downStops[currentLogicalFloor]) {
         Serial.println("Phys: Request at current floor. Opening doors.");
         physicalState = P_OPENING_DOOR;
@@ -191,7 +182,7 @@ void Elevator::processPhysicalState() {
         // If no job here, ask the logic class what to do
         this -> changeElevatorMoving(); // Updates elev.state
         
-        // RETTET: Bruker "::State::" istedenfor ".State::"
+     
         if (state != Elevator::State::Idle) {
           // Logic class wants to move. Find the *next* stop.
           physicalTargetFloor = findNextTargetInDirection();
@@ -223,6 +214,19 @@ void Elevator::processPhysicalState() {
           }
         }
       }
+
+}
+void Elevator::processPhysicalState() {
+  
+  //State machine
+  switch (physicalState) {
+    Serial.print("DEBUG: this ->state = ");
+    Serial.println((int)this ->state);
+
+    case P_IDLE: {
+      // Elevator is stopped, doors are closed. Time to find a new job.
+      isRequest();
+      
       LCD::currentLogicalFloor = currentLogicalFloor;
       LCD::physicalTargetFloor = physicalTargetFloor;
       LCD::physicalState = physicalState;
@@ -243,7 +247,9 @@ void Elevator::processPhysicalState() {
     LCD::physicalTargetFloor = physicalTargetFloor;
     LCD::physicalState = P_MOVING;
 
+    // areweinteleranse
     // Sjekk om vi er innenfor toleranse
+    
     if (abs((float)(targetPulses - DCmotor::EncoderCount) / DCmotor::PulsesPerRevolution) < DCmotor::floorTolerance) {
         DCmotor::PwmValue = 0;
         analogWrite(DCmotor::PWMpin, 0);

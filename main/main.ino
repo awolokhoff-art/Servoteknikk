@@ -8,12 +8,12 @@
 #include "LCD.h"
 #include "PhysicalState.h"
 #include "PID.h"
-#include "Button.h"
+#include "Control.h"
 #include "LED.h"
 
 // Class names
 Elevator elev;
-Button button;
+Control control;
 DCmotor Dcmoto;
 LCD lcden;
 Stepper step;
@@ -46,7 +46,7 @@ void setup() {
   set_dac(3500, 3500);
 
   //Initialize Buttons (UI)
-  button.Button_init();
+  control.Button_init();
 
   //Initialize LED
   LED::LED_init();
@@ -63,10 +63,10 @@ void setup() {
 void loop() {
  
   // Check for button presses
-  button.checkButtons();
+  control.checkButtons();
 
   // Check for seriell input 
-  button.checkSerialInput();
+  control.checkSerialInput();
    // Read inputs
   Dcmoto.GetEncoderPos();
 

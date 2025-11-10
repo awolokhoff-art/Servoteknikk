@@ -1,5 +1,5 @@
 #include "LED.h"
-#include "Button.h" 
+#include "Control.h" 
 
 const int LED::ledPins[LED::NUM_LEDS] = {49, 48, 47, 46, 45, 44, 43, 42}; // LEDs 0-7
 
