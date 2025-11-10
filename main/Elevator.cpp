@@ -238,8 +238,12 @@ void Elevator::processPhysicalState() {
    case P_MOVING: {
     long targetPulses = physicalTargetFloor * DCmotor::PulsesPerRevolution;
     PID::computePID(targetPulses, DCmotor::EncoderCount);
+    
+    if(DCmotor::PwmValue > 100){
+      DCmotor::PwmValue = 100;
+    }
+    
     analogWrite(DCmotor::PWMpin, DCmotor::PwmValue);
-
     digitalWrite(DCmotor::directionPin, DCmotor::MotorDirection ? HIGH : LOW);
 
     currentLogicalFloor = round((float)DCmotor::EncoderCount / DCmotor::PulsesPerRevolution); 
