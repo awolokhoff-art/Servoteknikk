@@ -24,6 +24,7 @@ public:
   static bool MotorDirection;
 
   static float floorTolerance;
+  static float velocity;
 
   DCmotor();
   static void DC_init();
@@ -31,6 +32,7 @@ public:
   static void encoderAChange();
   static void encoderBChange();
   static void GetEncoderPos();
+  static void UpdateVelocity();
 
 
 

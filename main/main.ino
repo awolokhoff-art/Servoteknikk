@@ -69,6 +69,7 @@ void loop() {
   control.checkSerialInput();
    // Read inputs
   Dcmoto.GetEncoderPos();
+  Dcmoto.UpdateVelocity();
 
   // Prosses state machine
   elev.processPhysicalState();

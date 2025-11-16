@@ -19,6 +19,8 @@ volatile long DCmotor::EncoderCount = 0;
 bool DCmotor::MotorDirection = true;
 
 float DCmotor::floorTolerance = 0.05;
+float DCmotor::velocity = 0.0;
+
 
 DCmotor::DCmotor(){
 }
@@ -66,3 +68,26 @@ void DCmotor::GetEncoderPos() {
       Serial.print("Phys: Reached floor ");
       Serial.println(currentLogicalFloor);
   }}
+
+
+void DCmotor::UpdateVelocity() {
+    static unsigned long lastTime = 0;
+    static float lastPos = 0.0;
+
+    unsigned long now = millis();
+    if (now - lastTime >= 50) {  // 10 ms sampling interval
+        float currentPos = currentEncoderFloor;
+
+        float dt = (now - lastTime) / 1000.0;  // convert ms → seconds
+        velocity = (currentPos - lastPos) / dt;
+
+        lastPos = currentPos;
+        lastTime = now;
+
+        Serial.print("Position: ");
+        Serial.print(currentPos);
+        Serial.print(", Velocity: ");
+        Serial.println(velocity);
+    }
+}
+
